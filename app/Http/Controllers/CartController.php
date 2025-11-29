@@ -13,17 +13,32 @@ class CartController extends Controller
     public function show(Request $request)
     {
         $user = $request->user();
-        $cart = Cart::with(['items.product.images', 'items.product.store'])
-            ->where('user_id', $user->id)
-            ->first();
+        $cart = Cart::with(['items.product.images', 'items.product.prices', 'store'])
+                   ->where('user_id', $user->id)
+                   ->first();
 
         if (!$cart) {
-            return response()->json(['items' => [], 'total' => 0]);
+            return response()->json([
+                'items' => [],
+                'totals' => [
+                    'subtotal' => 0,
+                    'tax_amount' => 0,
+                    'shipping_cost' => 0,
+                    'total_amount' => 0
+                ]
+            ]);
         }
+
+        $cart->calculateTotals();
 
         return response()->json([
             'items' => $cart->items,
-            'total' => $cart->total
+            'totals' => [
+                'subtotal' => $cart->subtotal,
+                'tax_amount' => $cart->tax_amount,
+                'shipping_cost' => $cart->shipping_cost,
+                'total_amount' => $cart->total_amount
+            ]
         ]);
     }
 
@@ -32,17 +47,27 @@ class CartController extends Controller
         $request->validate([
             'product_id' => 'required|exists:products,id',
             'quantity' => 'required|integer|min:1',
+            'store_id' => 'required|exists:stores,id',
         ]);
 
         $user = $request->user();
-        $product = Product::with('prices')->findOrFail($request->product_id);
+        $product = Product::with(['prices', 'store'])->findOrFail($request->product_id);
 
-        // Verifica se o produto está ativo
-        if (!$product->is_active) {
-            return response()->json(['message' => 'Produto não disponível'], 400);
+        // Verificar se o produto pertence à loja
+        if ($product->store_id != $request->store_id) {
+            return response()->json([
+                'message' => 'O produto não pertence a esta loja'
+            ], 422);
         }
 
-        // Verifica stock se for mercadoria
+        // Verificar se o produto está ativo
+        if (!$product->is_active) {
+            return response()->json([
+                'message' => 'Produto não disponível'
+            ], 400);
+        }
+
+        // Verificar stock se for mercadoria
         if ($product->isGood() && $product->track_stock) {
             $availableStock = $product->getCurrentStock($product->store->warehouses->first()->id);
             if ($availableStock < $request->quantity) {
@@ -53,26 +78,48 @@ class CartController extends Controller
         }
 
         return DB::transaction(function () use ($user, $product, $request) {
-            $cart = Cart::firstOrCreate(['user_id' => $user->id]);
+            // Encontrar ou criar carrinho
+            $cart = Cart::firstOrCreate([
+                'user_id' => $user->id,
+                'store_id' => $request->store_id,
+            ]);
 
-            $unitPrice = $product->prices()->first()->price;
+            $unitPrice = $product->getCurrentPrice();
 
+            // Verificar se o item já existe no carrinho
             $cartItem = CartItem::where('cart_id', $cart->id)
-                ->where('product_id', $product->id)
-                ->first();
+                               ->where('product_id', $product->id)
+                               ->first();
 
             if ($cartItem) {
-                $cartItem->increment('quantity', $request->quantity);
+                $newQuantity = $cartItem->quantity + $request->quantity;
+                
+                // Verificar stock novamente para a nova quantidade
+                if ($product->isGood() && $product->track_stock) {
+                    $availableStock = $product->getCurrentStock($product->store->warehouses->first()->id);
+                    if ($availableStock < $newQuantity) {
+                        return response()->json([
+                            'message' => 'Stock insuficiente. Disponível: ' . $availableStock
+                        ], 400);
+                    }
+                }
+
+                $cartItem->update([
+                    'quantity' => $newQuantity,
+                    'total_price' => $newQuantity * $unitPrice
+                ]);
             } else {
                 $cartItem = CartItem::create([
                     'cart_id' => $cart->id,
                     'product_id' => $product->id,
                     'quantity' => $request->quantity,
                     'unit_price' => $unitPrice,
+                    'total_price' => $request->quantity * $unitPrice,
                 ]);
             }
 
-            $cart->load('items.product');
+            $cart->calculateTotals();
+            $cart->load(['items.product.images', 'items.product.prices']);
 
             return response()->json([
                 'message' => 'Produto adicionado ao carrinho',
@@ -88,17 +135,17 @@ class CartController extends Controller
         ]);
 
         $user = $request->user();
-        $cartItem = CartItem::with('product', 'cart')
-            ->whereHas('cart', function ($query) use ($user) {
-                $query->where('user_id', $user->id);
-            })
-            ->findOrFail($id);
+        $cartItem = CartItem::with(['product', 'cart'])
+                           ->whereHas('cart', function ($query) use ($user) {
+                               $query->where('user_id', $user->id);
+                           })
+                           ->findOrFail($id);
 
-        // Verifica stock se for mercadoria
-        if ($cartItem->product->isGood() && $cartItem->product->track_stock) {
-            $availableStock = $cartItem->product->getCurrentStock(
-                $cartItem->product->store->warehouses->first()->id
-            );
+        $product = $cartItem->product;
+
+        // Verificar stock se for mercadoria
+        if ($product->isGood() && $product->track_stock) {
+            $availableStock = $product->getCurrentStock($product->store->warehouses->first()->id);
             if ($availableStock < $request->quantity) {
                 return response()->json([
                     'message' => 'Stock insuficiente. Disponível: ' . $availableStock
@@ -106,11 +153,16 @@ class CartController extends Controller
             }
         }
 
-        $cartItem->update(['quantity' => $request->quantity]);
+        $cartItem->update([
+            'quantity' => $request->quantity,
+            'total_price' => $request->quantity * $cartItem->unit_price
+        ]);
+
+        $cartItem->cart->calculateTotals();
 
         return response()->json([
             'message' => 'Item atualizado',
-            'item' => $cartItem
+            'item' => $cartItem->fresh('product.images')
         ]);
     }
 
@@ -121,8 +173,41 @@ class CartController extends Controller
             $query->where('user_id', $user->id);
         })->findOrFail($id);
 
+        $cart = $cartItem->cart;
         $cartItem->delete();
 
-        return response()->json(['message' => 'Item removido do carrinho']);
+        $cart->calculateTotals();
+
+        return response()->json([
+            'message' => 'Item removido do carrinho',
+            'cart' => $cart->fresh(['items.product.images'])
+        ]);
+    }
+
+    public function clear(Request $request)
+    {
+        $user = $request->user();
+        $cart = Cart::where('user_id', $user->id)->first();
+
+        if ($cart) {
+            $cart->items()->delete();
+            $cart->calculateTotals();
+        }
+
+        return response()->json([
+            'message' => 'Carrinho limpo'
+        ]);
+    }
+
+    public function getCartCount(Request $request)
+    {
+        $user = $request->user();
+        $cart = Cart::where('user_id', $user->id)->first();
+
+        $count = $cart ? $cart->items->sum('quantity') : 0;
+
+        return response()->json([
+            'count' => $count
+        ]);
     }
 }

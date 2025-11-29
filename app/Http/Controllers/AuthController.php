@@ -5,14 +5,14 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
-use Laravel\Sanctum\HasApiTokens;
 
 class AuthController extends Controller
 {
     public function register(Request $request)
     {
-        $request->validate([
+        $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users',
             'password' => 'required|string|min:8|confirmed',
@@ -20,6 +20,12 @@ class AuthController extends Controller
             'phone' => 'required|string|max:20',
             'nif' => 'required|string|max:25|unique:users',
         ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'errors' => $validator->errors()
+            ], 422);
+        }
 
         $user = User::create([
             'name' => $request->name,
@@ -35,7 +41,7 @@ class AuthController extends Controller
         return response()->json([
             'access_token' => $token,
             'token_type' => 'Bearer',
-            'user' => $user
+            'user' => $user->load(['stores', 'driverProfile'])
         ], 201);
     }
 
@@ -65,7 +71,7 @@ class AuthController extends Controller
         return response()->json([
             'access_token' => $token,
             'token_type' => 'Bearer',
-            'user' => $user
+            'user' => $user->load(['stores', 'driverProfile'])
         ]);
     }
 
@@ -73,48 +79,76 @@ class AuthController extends Controller
     {
         $request->user()->currentAccessToken()->delete();
 
-        return response()->json(['message' => 'Logout realizado com sucesso']);
+        return response()->json([
+            'message' => 'Logout realizado com sucesso'
+        ]);
     }
 
-    /*
     public function user(Request $request)
     {
         $user = $request->user();
         
-        // Carrega relações adicionais baseadas no tipo de usuário
         if ($user->isSeller()) {
-            $user->load('stores');
+            $user->load(['stores.company', 'stores.products']);
         } elseif ($user->isDriver()) {
-            $user->load('driverProfile');
+            $user->load(['driverProfile.vehicle', 'driverProfile.company']);
         }
 
         return response()->json($user);
     }
-*/
 
-  
-// ...existing code...
-    public function user(Request $request)
+    public function updateProfile(Request $request)
     {
         $user = $request->user();
 
-        // Carrega relações adicionais baseadas no tipo de usuário
-        $relationsByType = [
-            'customer' => ['customerProfile', 'addresses', 'orders'],
-            'seller' => ['stores', 'products'],
-            'driver' => ['driverProfile', 'deliveries'],
-        ];
+        $validator = Validator::make($request->all(), [
+            'name' => 'sometimes|required|string|max:255',
+            'phone' => 'sometimes|required|string|max:20',
+            'avatar' => 'sometimes|image|mimes:jpeg,png,jpg,gif|max:2048',
+        ]);
 
-        $type = $user->type ?? null;
-
-        if ($type && isset($relationsByType[$type])) {
-            $toLoad = array_filter($relationsByType[$type], fn($rel) => method_exists($user, $rel));
-            if (!empty($toLoad)) {
-                $user->load($toLoad);
-            }
+        if ($validator->fails()) {
+            return response()->json([
+                'errors' => $validator->errors()
+            ], 422);
         }
 
-        return response()->json($user);
+        $data = $request->only(['name', 'phone']);
+
+        if ($request->hasFile('avatar')) {
+            $path = $request->file('avatar')->store('avatars', 'public');
+            $data['avatar'] = $path;
+        }
+
+        $user->update($data);
+
+        return response()->json([
+            'message' => 'Perfil atualizado com sucesso',
+            'user' => $user->fresh()
+        ]);
     }
-// ...existing code...
+
+    public function changePassword(Request $request)
+    {
+        $request->validate([
+            'current_password' => 'required',
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        $user = $request->user();
+
+        if (!Hash::check($request->current_password, $user->password)) {
+            return response()->json([
+                'message' => 'A password atual está incorreta'
+            ], 422);
+        }
+
+        $user->update([
+            'password' => Hash::make($request->password)
+        ]);
+
+        return response()->json([
+            'message' => 'Password alterada com sucesso'
+        ]);
+    }
 }

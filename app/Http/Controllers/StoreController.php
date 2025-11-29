@@ -11,25 +11,44 @@ class StoreController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Store::with(['company', 'owner'])
-            ->active()
-            ->verified();
+        $query = Store::with(['company', 'owner', 'products'])
+                     ->active()
+                     ->verified();
 
-        if ($request->has('search')) {
-            $query->where('name', 'like', '%' . $request->search . '%');
+        // Filtros
+        if ($request->has('company_id')) {
+            $query->where('company_id', $request->company_id);
         }
 
-        $stores = $query->orderBy('name')
-            ->paginate($request->get('per_page', 15));
+        if ($request->has('is_verified')) {
+            $query->where('is_verified', $request->boolean('is_verified'));
+        }
+
+        if ($request->has('search')) {
+            $search = $request->search;
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                  ->orWhere('email', 'like', "%{$search}%")
+                  ->orWhere('phone', 'like', "%{$search}%");
+            });
+        }
+
+        $stores = $query->orderBy('created_at', 'desc')
+                       ->paginate($request->get('per_page', 15));
 
         return response()->json($stores);
     }
 
     public function show($id)
     {
-        $store = Store::with(['company', 'owner', 'products' => function($query) {
-            $query->active()->with(['category', 'images']);
-        }])->active()->findOrFail($id);
+        $store = Store::with([
+            'company',
+            'owner',
+            'products.category',
+            'products.images',
+            'products.prices',
+            'orders'
+        ])->findOrFail($id);
 
         return response()->json($store);
     }
@@ -38,82 +57,138 @@ class StoreController extends Controller
     {
         $request->validate([
             'company_id' => 'required|exists:companies,id',
-            'name' => 'required|string|max:255',
+            'name' => 'required|string|max:255|unique:stores',
             'description' => 'nullable|string',
             'phone' => 'required|string|max:20',
             'email' => 'required|email',
             'address' => 'required|string',
+            'city' => 'required|string|max:100',
+            'postal_code' => 'required|string|max:20',
             'logo' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
             'banner' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:5120',
+            'business_hours' => 'nullable|array',
         ]);
 
-        // Verifica se o usuário pertence à empresa
-        $company = Company::where('id', $request->company_id)
-            ->whereHas('users', function ($query) use ($request) {
-                $query->where('user_id', $request->user()->id)
-                    ->where('role', 'owner');
-            })->firstOrFail();
+        // Verificar se o utilizador pertence à empresa
+        $user = $request->user();
+        $company = Company::findOrFail($request->company_id);
+        
+        if (!$company->users()->where('user_id', $user->id)->exists()) {
+            return response()->json([
+                'message' => 'Não tem permissão para criar lojas nesta empresa'
+            ], 403);
+        }
 
-        $storeData = $request->except(['logo', 'banner']);
-        $storeData['owner_id'] = $request->user()->id;
-        $storeData['slug'] = \Str::slug($request->name);
+        $data = $request->all();
+        $data['owner_id'] = $user->id;
+        $data['slug'] = \Str::slug($request->name);
 
-        // Upload logo
         if ($request->hasFile('logo')) {
-            $storeData['logo'] = $request->file('logo')->store('stores/logo', 'public');
+            $data['logo'] = $request->file('logo')->store('stores/logo', 'public');
         }
 
-        // Upload banner
         if ($request->hasFile('banner')) {
-            $storeData['banner'] = $request->file('banner')->store('stores/banner', 'public');
+            $data['banner'] = $request->file('banner')->store('stores/banner', 'public');
         }
 
-        $store = Store::create($storeData);
-        $store->load(['company', 'owner']);
+        $store = Store::create($data);
 
-        return response()->json($store, 201);
+        return response()->json([
+            'message' => 'Loja criada com sucesso',
+            'store' => $store->load(['company', 'owner'])
+        ], 201);
     }
 
     public function update(Request $request, $id)
     {
-        $store = Store::where('id', $id)
-            ->where('owner_id', $request->user()->id)
-            ->firstOrFail();
+        $store = Store::findOrFail($id);
+        $user = $request->user();
+
+        // Verificar se o utilizador é dono da loja
+        if ($store->owner_id !== $user->id && !$user->isAdmin()) {
+            return response()->json([
+                'message' => 'Não tem permissão para atualizar esta loja'
+            ], 403);
+        }
 
         $request->validate([
-            'name' => 'sometimes|required|string|max:255',
+            'name' => 'sometimes|required|string|max:255|unique:stores,name,' . $store->id,
             'description' => 'nullable|string',
             'phone' => 'sometimes|required|string|max:20',
             'email' => 'sometimes|required|email',
             'address' => 'sometimes|required|string',
+            'city' => 'sometimes|required|string|max:100',
+            'postal_code' => 'sometimes|required|string|max:20',
             'logo' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
             'banner' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:5120',
+            'business_hours' => 'nullable|array',
             'is_active' => 'boolean',
         ]);
 
-        $updateData = $request->except(['logo', 'banner']);
+        $data = $request->all();
 
-        // Upload logo
         if ($request->hasFile('logo')) {
             // Remove logo antiga
             if ($store->logo) {
                 Storage::disk('public')->delete($store->logo);
             }
-            $updateData['logo'] = $request->file('logo')->store('stores/logo', 'public');
+            $data['logo'] = $request->file('logo')->store('stores/logo', 'public');
         }
 
-        // Upload banner
         if ($request->hasFile('banner')) {
             // Remove banner antigo
             if ($store->banner) {
                 Storage::disk('public')->delete($store->banner);
             }
-            $updateData['banner'] = $request->file('banner')->store('stores/banner', 'public');
+            $data['banner'] = $request->file('banner')->store('stores/banner', 'public');
         }
 
-        $store->update($updateData);
-        $store->load(['company', 'owner']);
+        $store->update($data);
 
-        return response()->json($store);
+        return response()->json([
+            'message' => 'Loja atualizada com sucesso',
+            'store' => $store->fresh(['company', 'owner'])
+        ]);
+    }
+
+    public function myStores(Request $request)
+    {
+        $user = $request->user();
+        $stores = Store::with(['company', 'products'])
+                      ->where('owner_id', $user->id)
+                      ->orderBy('created_at', 'desc')
+                      ->paginate($request->get('per_page', 15));
+
+        return response()->json($stores);
+    }
+
+    public function toggleVerification($id)
+    {
+        $store = Store::findOrFail($id);
+        $store->update([
+            'is_verified' => !$store->is_verified
+        ]);
+
+        return response()->json([
+            'message' => 'Estado de verificação da loja atualizado',
+            'store' => $store->fresh()
+        ]);
+    }
+
+    public function getStoreStats($id)
+    {
+        $store = Store::findOrFail($id);
+        
+        $stats = [
+            'total_products' => $store->products()->count(),
+            'active_products' => $store->products()->active()->count(),
+            'total_orders' => $store->orders()->count(),
+            'completed_orders' => $store->orders()->where('status', 'delivered')->count(),
+            'total_revenue' => $store->orders()->where('status', 'delivered')->sum('total_amount'),
+            'average_rating' => $store->rating,
+            'total_reviews' => $store->total_reviews,
+        ];
+
+        return response()->json($stats);
     }
 }

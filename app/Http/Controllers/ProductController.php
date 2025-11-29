@@ -6,42 +6,60 @@ use App\Models\Product;
 use App\Models\Store;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 
 class ProductController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Product::with(['store', 'category', 'brand', 'unit', 'images'])
-            ->active()
-            ->whereHas('store', function ($q) {
-                $q->where('is_active', true);
-            });
+        $query = Product::with([
+            'store.company',
+            'category',
+            'brand',
+            'unit',
+            'images',
+            'prices'
+        ])->active();
 
         // Filtros
+        if ($request->has('store_id')) {
+            $query->where('store_id', $request->store_id);
+        }
+
         if ($request->has('category_id')) {
             $query->where('category_id', $request->category_id);
         }
 
-        if ($request->has('store_id')) {
-            $query->where('store_id', $request->store_id);
+        if ($request->has('brand_id')) {
+            $query->where('brand_id', $request->brand_id);
         }
 
         if ($request->has('kind')) {
             $query->where('kind', $request->kind);
         }
 
+        if ($request->has('is_active')) {
+            $query->where('is_active', $request->boolean('is_active'));
+        }
+
         if ($request->has('search')) {
-            $query->where(function ($q) use ($request) {
-                $q->where('name', 'like', '%' . $request->search . '%')
-                  ->orWhere('description', 'like', '%' . $request->search . '%')
-                  ->orWhere('sku', 'like', '%' . $request->search . '%');
+            $search = $request->search;
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                  ->orWhere('description', 'like', "%{$search}%")
+                  ->orWhere('sku', 'like', "%{$search}%")
+                  ->orWhere('barcode', 'like', "%{$search}%");
             });
         }
 
         // Ordenação
         $sortBy = $request->get('sort_by', 'created_at');
         $sortOrder = $request->get('sort_order', 'desc');
-        $query->orderBy($sortBy, $sortOrder);
+        
+        $allowedSort = ['name', 'price', 'rating', 'total_sold', 'created_at'];
+        if (in_array($sortBy, $allowedSort)) {
+            $query->orderBy($sortBy, $sortOrder);
+        }
 
         $products = $query->paginate($request->get('per_page', 15));
 
@@ -51,15 +69,14 @@ class ProductController extends Controller
     public function show($id)
     {
         $product = Product::with([
-            'store', 
-            'category', 
-            'brand', 
-            'unit', 
+            'store.company',
+            'category',
+            'brand',
+            'unit',
             'images',
+            'prices',
             'packaging',
-            'prices' => function($query) {
-                $query->orderBy('price', 'asc');
-            }
+            'reviews.user'
         ])->active()->findOrFail($id);
 
         return response()->json($product);
@@ -88,37 +105,53 @@ class ProductController extends Controller
             'images.*' => 'image|mimes:jpeg,png,jpg,gif|max:2048',
         ]);
 
-        // Verifica se o usuário é dono da loja
-        $store = Store::where('id', $request->store_id)
-            ->where('owner_id', $request->user()->id)
-            ->firstOrFail();
+        $user = $request->user();
+        $store = Store::findOrFail($request->store_id);
+
+        // Verificar se o utilizador é dono da loja
+        if ($store->owner_id !== $user->id && !$user->isAdmin()) {
+            return response()->json([
+                'message' => 'Não tem permissão para adicionar produtos a esta loja'
+            ], 403);
+        }
 
         $product = Product::create($request->except('images'));
 
         // Upload de imagens
         if ($request->hasFile('images')) {
-            foreach ($request->file('images') as $image) {
+            foreach ($request->file('images') as $index => $image) {
                 $path = $image->store('products', 'public');
                 
                 $product->images()->create([
                     'image_path' => $path,
-                    'is_primary' => false,
+                    'is_primary' => $index === 0,
+                    'order' => $index,
                 ]);
             }
         }
 
-        $product->load(['store', 'category', 'brand', 'unit', 'images']);
+        // Criar preço padrão
+        $product->prices()->create([
+            'price' => $request->price ?? 0,
+            'is_active' => true,
+        ]);
 
-        return response()->json($product, 201);
+        return response()->json([
+            'message' => 'Produto criado com sucesso',
+            'product' => $product->load(['store', 'category', 'brand', 'unit', 'images'])
+        ], 201);
     }
 
     public function update(Request $request, $id)
     {
         $product = Product::with('store')->findOrFail($id);
+        $user = $request->user();
 
-        // Verifica se o usuário é dono da loja
-        if ($product->store->owner_id !== $request->user()->id) {
-            return response()->json(['message' => 'Não autorizado'], 403);
+        // Verificar se o utilizador é dono da loja
+        if ($product->store->owner_id !== $user->id && !$user->isAdmin()) {
+            return response()->json([
+                'message' => 'Não tem permissão para atualizar este produto'
+            ], 403);
         }
 
         $request->validate([
@@ -132,11 +165,28 @@ class ProductController extends Controller
             'is_active' => 'boolean',
             'min_stock' => 'nullable|numeric|min:0',
             'max_stock' => 'nullable|numeric|min:0',
+            'images' => 'nullable|array',
+            'images.*' => 'image|mimes:jpeg,png,jpg,gif|max:2048',
         ]);
 
-        $product->update($request->all());
+        $product->update($request->except('images'));
 
-        return response()->json($product);
+        // Adicionar novas imagens
+        if ($request->hasFile('images')) {
+            foreach ($request->file('images') as $image) {
+                $path = $image->store('products', 'public');
+                
+                $product->images()->create([
+                    'image_path' => $path,
+                    'is_primary' => false,
+                ]);
+            }
+        }
+
+        return response()->json([
+            'message' => 'Produto atualizado com sucesso',
+            'product' => $product->fresh(['store', 'category', 'brand', 'unit', 'images'])
+        ]);
     }
 
     public function myProducts(Request $request)
@@ -151,5 +201,71 @@ class ProductController extends Controller
             ->paginate($request->get('per_page', 15));
 
         return response()->json($products);
+    }
+
+    public function toggleStatus($id)
+    {
+        $product = Product::findOrFail($id);
+        $product->update([
+            'is_active' => !$product->is_active
+        ]);
+
+        return response()->json([
+            'message' => 'Estado do produto atualizado',
+            'product' => $product->fresh()
+        ]);
+    }
+
+    public function updatePrimaryImage(Request $request, $productId, $imageId)
+    {
+        $product = Product::findOrFail($productId);
+        $user = $request->user();
+
+        // Verificar se o utilizador é dono da loja
+        if ($product->store->owner_id !== $user->id && !$user->isAdmin()) {
+            return response()->json([
+                'message' => 'Não tem permissão para atualizar este produto'
+            ], 403);
+        }
+
+        // Remover primary de todas as imagens
+        $product->images()->update(['is_primary' => false]);
+
+        // Definir nova imagem como primary
+        $image = $product->images()->findOrFail($imageId);
+        $image->update(['is_primary' => true]);
+
+        return response()->json([
+            'message' => 'Imagem principal atualizada com sucesso'
+        ]);
+    }
+
+    public function deleteImage($productId, $imageId)
+    {
+        $product = Product::findOrFail($productId);
+        $image = $product->images()->findOrFail($imageId);
+
+        // Não permitir eliminar a única imagem
+        if ($product->images()->count() <= 1) {
+            return response()->json([
+                'message' => 'Não é possível eliminar a única imagem do produto'
+            ], 422);
+        }
+
+        // Eliminar ficheiro
+        Storage::disk('public')->delete($image->image_path);
+        $image->delete();
+
+        // Se era a imagem primary, definir outra como primary
+        if ($image->is_primary) {
+            $newPrimary = $product->images()->first();
+            if ($newPrimary) {
+                $newPrimary->update(['is_primary' => true]);
+            }
+        }
+
+        return response()->json([
+            'message' => 'Imagem eliminada com sucesso'
+        ]);
     }
 }
