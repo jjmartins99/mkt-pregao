@@ -16,7 +16,7 @@ class CheckUserType
         }
 
         if (!in_array($user->type, $types)) {
-            return response()->json(['message' => 'Não autorizado'], 403);
+            return response()->json(['message' => 'Não autorizado para esta operação'], 403);
         }
 
         return $next($request);
