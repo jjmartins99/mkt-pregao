@@ -12,7 +12,13 @@ class DatabaseSeeder extends Seeder
             UserTypesSeeder::class,
             UnitsSeeder::class,
             CategoriesSeeder::class,
+            BrandsSeeder::class,
+            TaxesSeeder::class,
             AdminUserSeeder::class,
+            CompaniesSeeder::class,
+            StoresSeeder::class,
+            ProductsSeeder::class,
+            PermissionsSeeder::class,
         ]);
     }
 }
