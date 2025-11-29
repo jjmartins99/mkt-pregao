@@ -6,14 +6,25 @@ use App\Models\Company;
 use App\Models\CompanyUser;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Gate;
 
 class CompanyController extends Controller
 {
     public function index(Request $request)
     {
+        // Autorização para ver lista de empresas
+        $this->authorize('viewAny', Company::class);
+
         $query = Company::with(['mainBranch', 'users', 'stores']);
 
-        // Filtros
+        // Para sellers, mostrar apenas empresas onde estão associados
+        if ($request->user()->isSeller() && !$request->user()->isAdmin()) {
+            $query->whereHas('users', function ($q) use ($request) {
+                $q->where('user_id', $request->user()->id);
+            });
+        }
+
+        // Filtros (mantém os existentes)
         if ($request->has('type')) {
             $query->where('type', $request->type);
         }
@@ -47,11 +58,17 @@ class CompanyController extends Controller
             'drivers.user'
         ])->findOrFail($id);
 
+        // Autorização para ver empresa específica
+        $this->authorize('view', $company);
+
         return response()->json($company);
     }
 
     public function store(Request $request)
     {
+        // Autorização para criar empresas
+        $this->authorize('create', Company::class);
+
         $request->validate([
             'name' => 'required|string|max:255',
             'nif' => 'required|string|max:25|unique:companies',
@@ -72,6 +89,14 @@ class CompanyController extends Controller
 
         $company = Company::create($data);
 
+        // Associar o utilizador atual como owner se for seller
+        if ($request->user()->isSeller()) {
+            $company->users()->attach($request->user()->id, [
+                'role' => 'owner',
+                'is_active' => true
+            ]);
+        }
+
         return response()->json([
             'message' => 'Empresa criada com sucesso',
             'company' => $company
@@ -81,6 +106,9 @@ class CompanyController extends Controller
     public function update(Request $request, $id)
     {
         $company = Company::findOrFail($id);
+
+        // Autorização para atualizar empresa
+        $this->authorize('update', $company);
 
         $request->validate([
             'name' => 'sometimes|required|string|max:255',
@@ -115,6 +143,9 @@ class CompanyController extends Controller
     {
         $company = Company::findOrFail($companyId);
 
+        // Autorização para gerir utilizadores da empresa
+        $this->authorize('manageUsers', $company);
+
         $request->validate([
             'user_id' => 'required|exists:users,id',
             'role' => 'required|in:owner,manager,employee',
@@ -126,6 +157,13 @@ class CompanyController extends Controller
             return response()->json([
                 'message' => 'O utilizador já pertence a esta empresa'
             ], 422);
+        }
+
+        // Verificar permissão para atribuir role de owner
+        if ($request->role === 'owner' && !Gate::allows('is-company-owner', $company)) {
+            return response()->json([
+                'message' => 'Apenas o proprietário atual pode atribuir a role de owner'
+            ], 403);
         }
 
         $company->users()->attach($request->user_id, [
@@ -142,6 +180,29 @@ class CompanyController extends Controller
     public function removeUser($companyId, $userId)
     {
         $company = Company::findOrFail($companyId);
+
+        // Autorização para gerir utilizadores da empresa
+        $this->authorize('manageUsers', $company);
+
+        // Não permitir remover o último owner
+        $userToRemove = $company->users()->where('user_id', $userId)->first();
+        
+        if ($userToRemove && $userToRemove->pivot->role === 'owner') {
+            $ownerCount = $company->users()->wherePivot('role', 'owner')->count();
+            if ($ownerCount <= 1) {
+                return response()->json([
+                    'message' => 'Não é possível remover o único proprietário da empresa'
+                ], 422);
+            }
+        }
+
+        // Não permitir que um utilizador se remova a si mesmo
+        if ($userId == auth()->id()) {
+            return response()->json([
+                'message' => 'Não pode remover-se a si mesmo da empresa'
+            ], 422);
+        }
+
         $company->users()->detach($userId);
 
         return response()->json([
@@ -152,6 +213,10 @@ class CompanyController extends Controller
     public function toggleStatus($id)
     {
         $company = Company::findOrFail($id);
+
+        // Autorização para ativar/desativar empresa
+        $this->authorize('toggleStatus', $company);
+
         $company->update([
             'is_active' => !$company->is_active
         ]);
@@ -160,5 +225,38 @@ class CompanyController extends Controller
             'message' => 'Estado da empresa atualizado',
             'company' => $company->fresh()
         ]);
+    }
+
+    public function destroy($id)
+    {
+        $company = Company::findOrFail($id);
+
+        // Autorização para eliminar empresa
+        $this->authorize('delete', $company);
+
+        $company->delete();
+
+        return response()->json([
+            'message' => 'Empresa eliminada com sucesso'
+        ]);
+    }
+
+    public function getCompanyStats($id)
+    {
+        $company = Company::findOrFail($id);
+
+        // Autorização para ver relatórios da empresa
+        $this->authorize('viewReports', $company);
+
+        $stats = [
+            'total_stores' => $company->stores()->count(),
+            'total_branches' => $company->branches()->count(),
+            'total_warehouses' => $company->warehouses()->count(),
+            'total_employees' => $company->users()->count(),
+            'active_stores' => $company->stores()->where('is_active', true)->count(),
+            'total_products' => $company->stores()->withCount('products')->get()->sum('products_count'),
+        ];
+
+        return response()->json($stats);
     }
 }

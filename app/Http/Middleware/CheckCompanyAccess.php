@@ -10,12 +10,6 @@ class CheckCompanyAccess
 {
     public function handle(Request $request, Closure $next)
     {
-        $user = $request->user();
-        
-        if ($user->isAdmin()) {
-            return $next($request);
-        }
-
         $companyId = $request->route('company') ?? $request->route('id');
         
         if ($companyId) {
@@ -25,7 +19,8 @@ class CheckCompanyAccess
                 return response()->json(['message' => 'Empresa não encontrada'], 404);
             }
 
-            if (!$company->users()->where('user_id', $user->id)->exists()) {
+            // Usar a policy em vez de lógica customizada
+            if (!auth()->user()->can('view', $company)) {
                 return response()->json(['message' => 'Não tem permissão para aceder esta empresa'], 403);
             }
         }
