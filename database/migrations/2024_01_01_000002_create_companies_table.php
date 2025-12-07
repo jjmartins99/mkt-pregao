@@ -25,23 +25,29 @@ return new class extends Migration
             $table->softDeletes();
         });
 
-        // Tabela pivô para users e companies
+        // Tabela pivô para users e companies - VERSÃO CORRIGIDA 
+        //vai para o outro ficheiro de migração
+        /*
         Schema::create('company_users', function (Blueprint $table) {
             $table->id();
             $table->foreignId('company_id')->constrained()->onDelete('cascade');
             $table->foreignId('user_id')->constrained()->onDelete('cascade');
             $table->enum('role', ['owner', 'manager', 'employee'])->default('employee');
-            $table->foreignId('branch_id')->nullable()->constrained('branches')->onDelete('set null');
+            
+            // CORREÇÃO: Apenas campo, SEM foreign key (será adicionada depois)
+            $table->unsignedBigInteger('branch_id')->nullable();
+            // $table->foreignId('branch_id')->nullable()->constrained('branches')->onDelete('set null');
+            
             $table->boolean('is_active')->default(true);
             $table->timestamps();
             
             $table->unique(['company_id', 'user_id']);
-        });
+        });*/
     }
 
     public function down()
     {
-        Schema::dropIfExists('company_users');
+//        Schema::dropIfExists('company_users');
         Schema::dropIfExists('companies');
     }
 };

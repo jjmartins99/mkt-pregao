@@ -46,6 +46,8 @@ return new class extends Migration
             $table->timestamps();
         });
 
+        //VAI para outra tabela de migração
+        /*
         // Tabela para tracking de entregas
         Schema::create('delivery_tracking', function (Blueprint $table) {
             $table->id();
@@ -59,11 +61,12 @@ return new class extends Migration
             $table->timestamp('status_changed_at')->nullable();
             $table->timestamps();
         });
+        */
     }
 
     public function down()
     {
-        Schema::dropIfExists('delivery_tracking');
+        //Schema::dropIfExists('delivery_tracking');
         Schema::dropIfExists('vehicles');
         Schema::dropIfExists('drivers');
     }
