@@ -10,9 +10,6 @@ use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
-    /**
-     * Registro de novo usuário
-     */
     public function register(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -37,133 +34,72 @@ class AuthController extends Controller
             'type' => $request->type,
             'phone' => $request->phone,
             'nif' => $request->nif,
-            'is_active' => true, // Garantir que está ativo
         ]);
-
-        // Verificar se Sanctum está disponível
-        if (!method_exists($user, 'createToken')) {
-            return response()->json([
-                'message' => 'Sistema de tokens não configurado',
-                'user' => $user
-            ], 201);
-        }
 
         $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
             'access_token' => $token,
             'token_type' => 'Bearer',
-            'expires_in' => 3600,
-            'user' => $user
+            'user' => $user->load(['stores', 'driverProfile'])
         ], 201);
     }
 
-    /**
-     * Login de usuário
-     */
     public function login(Request $request)
     {
-        // Validar entrada
         $request->validate([
             'email' => 'required|email',
             'password' => 'required',
         ]);
 
-        // Buscar usuário
         $user = User::where('email', $request->email)->first();
 
-        // Verificar credenciais
         if (!$user || !Hash::check($request->password, $user->password)) {
-            return response()->json([
-                'message' => 'Credenciais inválidas'
-            ], 401);
-        }
-
-        // Verificar se usuário está ativo
-        if (!$user->is_active) {
-            return response()->json([
-                'message' => 'Conta desativada'
-            ], 403);
-        }
-
-        // Verificar se Sanctum está disponível
-        if (!method_exists($user, 'createToken')) {
-            return response()->json([
-                'message' => 'Sistema de tokens não configurado',
-                'user' => $user
+            throw ValidationException::withMessages([
+                'email' => ['As credenciais fornecidas estão incorretas.'],
             ]);
         }
 
-        // Gerar token
+        if (!$user->is_active) {
+            throw ValidationException::withMessages([
+                'email' => ['A sua conta está desativada.'],
+            ]);
+        }
+
         $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
             'access_token' => $token,
             'token_type' => 'Bearer',
-            'expires_in' => 3600,
-            'user' => $user
+            'user' => $user->load(['stores', 'driverProfile'])
         ]);
     }
 
-    /**
-     * Logout do usuário
-     */
     public function logout(Request $request)
     {
-        try {
-            if ($request->user()) {
-                $request->user()->currentAccessToken()->delete();
-            }
-            
-            return response()->json([
-                'message' => 'Logout realizado com sucesso'
-            ]);
-        } catch (\Exception $e) {
-            return response()->json([
-                'message' => 'Erro ao fazer logout'
-            ], 500);
-        }
+        $request->user()->currentAccessToken()->delete();
+
+        return response()->json([
+            'message' => 'Logout realizado com sucesso'
+        ]);
     }
 
-    /**
-     * Obter dados do usuário autenticado
-     */
     public function user(Request $request)
     {
         $user = $request->user();
         
-        if (!$user) {
-            return response()->json([
-                'message' => 'Não autenticado'
-            ], 401);
-        }
-
-        // Carregar relações baseadas no tipo de usuário
-        if (method_exists($user, 'isSeller') && $user->isSeller()) {
-            if (method_exists($user, 'load')) {
-                $user->load(['stores.company', 'stores.products']);
-            }
-        } elseif (method_exists($user, 'isDriver') && $user->isDriver()) {
-            if (method_exists($user, 'load')) {
-                $user->load(['driverProfile.vehicle', 'driverProfile.company']);
-            }
+        if ($user->isSeller()) {
+            $user->load(['stores.company', 'stores.products']);
+        } elseif ($user->isDriver()) {
+            $user->load(['driverProfile.vehicle', 'driverProfile.company']);
         }
 
         return response()->json($user);
     }
 
-    /**
-     * Atualizar perfil do usuário
-     */
     public function updateProfile(Request $request)
     {
         $user = $request->user();
-        
-        if (!$user) {
-            return response()->json([
-                'message' => 'Não autenticado'
-            ], 401);
-        }
 
         $validator = Validator::make($request->all(), [
             'name' => 'sometimes|required|string|max:255',
@@ -192,27 +128,18 @@ class AuthController extends Controller
         ]);
     }
 
-    /**
-     * Alterar senha do usuário
-     */
     public function changePassword(Request $request)
     {
-        $user = $request->user();
-        
-        if (!$user) {
-            return response()->json([
-                'message' => 'Não autenticado'
-            ], 401);
-        }
-
         $request->validate([
             'current_password' => 'required',
             'password' => 'required|string|min:8|confirmed',
         ]);
 
+        $user = $request->user();
+
         if (!Hash::check($request->current_password, $user->password)) {
             return response()->json([
-                'message' => 'Senha atual incorreta'
+                'message' => 'A password atual está incorreta'
             ], 422);
         }
 
@@ -221,19 +148,7 @@ class AuthController extends Controller
         ]);
 
         return response()->json([
-            'message' => 'Senha alterada com sucesso'
-        ]);
-    }
-
-    /**
-     * Verificar se API está funcionando
-     */
-    public function test()
-    {
-        return response()->json([
-            'status' => 'online',
-            'message' => 'API AuthController funcionando',
-            'timestamp' => date('Y-m-d H:i:s')
+            'message' => 'Password alterada com sucesso'
         ]);
     }
 }
